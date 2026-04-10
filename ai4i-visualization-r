@@ -1,0 +1,67 @@
+library(readr)
+library(ggplot2)
+library(dplyr)
+
+df <- read_csv("C:/Users/Гений/Desktop/Новая папка/ai4i2020.csv")
+
+df <- df %>%
+  mutate(`Temperature delta [K]` = `Process temperature [K]` - `Air temperature [K]`)
+
+# 1. Гистограмма скорости вращения
+p1 <- ggplot(df, aes(x = `Rotational speed [rpm]`)) +
+  geom_histogram(bins = 25) +
+  labs(
+    title = "Распределение скорости вращения",
+    x = "Rotational speed [rpm]",
+    y = "Частота"
+  )
+
+print(p1)
+
+ggsave(
+  "C:/Users/Гений/Desktop/Новая папка/histogram.png",
+  plot = p1,
+  width = 8,
+  height = 5
+)
+
+# 2. Boxplot износа инструмента
+p2 <- ggplot(df, aes(y = `Tool wear [min]`)) +
+  geom_boxplot() +
+  labs(
+    title = "Износ инструмента",
+    y = "Tool wear [min]"
+  )
+
+print(p2)
+
+ggsave(
+  "C:/Users/Гений/Desktop/Новая папка/boxplot.png",
+  plot = p2,
+  width = 6,
+  height = 5
+)
+
+# 3. Доля отказов по типам машин
+failure_by_type <- df %>%
+  group_by(Type) %>%
+  summarise(FailureRate = mean(`Machine failure`), .groups = "drop")
+
+print(failure_by_type)
+
+p3 <- ggplot(failure_by_type, aes(x = Type, y = FailureRate)) +
+  geom_col() +
+  labs(
+    title = "Доля отказов по типам машин",
+    x = "Тип машины",
+    y = "Доля отказов"
+  )
+
+print(p3)
+
+ggsave(
+  "C:/Users/Гений/Desktop/Новая папка/failure_by_type.png",
+  plot = p3,
+  width = 6,
+  height = 5
+)
