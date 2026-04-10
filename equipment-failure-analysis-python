@@ -1,0 +1,676 @@
+
+import os
+from pathlib import Path
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+
+import numpy as np
+import pandas as pd
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+from matplotlib.figure import Figure
+from scipy.stats import chi2_contingency, f_oneway
+from sklearn.ensemble import IsolationForest, RandomForestClassifier
+from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+
+
+class AI4IApp(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("AI4I 2020 Predictive Maintenance Analyzer")
+        self.geometry("1550x930")
+        self.minsize(1280, 760)
+
+        self.base_dir = Path(__file__).resolve().parent
+        self.df_raw = None
+        self.df = None
+        self.model = None
+        self.model_features = []
+        self.feature_importances_ = None
+        self.last_text = ""
+        self.last_plot_name = "plot"
+
+        self._build_ui()
+        self._autoload_local_dataset()
+
+    # ---------- UI ----------
+    def _build_ui(self):
+        self.columnconfigure(1, weight=1)
+        self.rowconfigure(0, weight=1)
+
+        left = ttk.Frame(self, padding=10)
+        left.grid(row=0, column=0, sticky="nsw")
+        right = ttk.Frame(self, padding=10)
+        right.grid(row=0, column=1, sticky="nsew")
+        right.columnconfigure(0, weight=1)
+        right.rowconfigure(1, weight=1)
+
+        ttk.Label(left, text="AI4I 2020 / Курсовой анализ", font=("Times New Roman", 16, "bold")).pack(anchor="w", pady=(0, 8))
+
+        load_box = ttk.LabelFrame(left, text="Данные", padding=10)
+        load_box.pack(fill="x", pady=5)
+        ttk.Button(load_box, text="Открыть CSV", command=self.open_csv).pack(fill="x", pady=2)
+        ttk.Button(load_box, text="Автозагрузить ai4i2020.csv", command=self._autoload_local_dataset).pack(fill="x", pady=2)
+        ttk.Button(load_box, text="Сброс", command=self.reset_all).pack(fill="x", pady=2)
+        self.file_var = tk.StringVar(value="Файл не загружен")
+        ttk.Label(load_box, textvariable=self.file_var, wraplength=300).pack(anchor="w", pady=(6, 0))
+
+        sec2 = ttk.LabelFrame(left, text="Раздел 2. Предобработка и EDA", padding=10)
+        sec2.pack(fill="x", pady=5)
+        self.drop_dups_var = tk.BooleanVar(value=True)
+        self.cap_outliers_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(sec2, text="Удалить дубликаты", variable=self.drop_dups_var).pack(anchor="w")
+        ttk.Checkbutton(sec2, text="Ограничить выбросы по IQR", variable=self.cap_outliers_var).pack(anchor="w")
+        ttk.Button(sec2, text="2.1 Предобработка", command=self.run_preprocessing).pack(fill="x", pady=2)
+        ttk.Button(sec2, text="2.2 Сводная статистика", command=self.show_stats).pack(fill="x", pady=2)
+        ttk.Button(sec2, text="2.2 Гистограмма", command=self.plot_histogram_dialog).pack(fill="x", pady=2)
+        ttk.Button(sec2, text="2.2 Boxplot", command=self.plot_boxplot_dialog).pack(fill="x", pady=2)
+        ttk.Button(sec2, text="2.2 Матрица корреляций", command=self.plot_corr).pack(fill="x", pady=2)
+        ttk.Button(sec2, text="2.2 Диаграмма рассеяния", command=self.plot_scatter_dialog).pack(fill="x", pady=2)
+        ttk.Button(sec2, text="2.2 Выводы по EDA", command=self.generate_eda_text).pack(fill="x", pady=2)
+
+        sec3 = ttk.LabelFrame(left, text="Глава 3. Методы анализа и моделирования", padding=10)
+        sec3.pack(fill="x", pady=5)
+        ttk.Button(sec3, text="3.1 Обоснование методов", command=self.show_methods_text).pack(fill="x", pady=2)
+        ttk.Button(sec3, text="3.2 ANOVA по типам машины", command=self.run_anova).pack(fill="x", pady=2)
+        ttk.Button(sec3, text="3.2 Хи-квадрат: Type × Failure", command=self.run_chi_square).pack(fill="x", pady=2)
+        ttk.Button(sec3, text="3.3 Поиск аномалий", command=self.run_anomaly_detection).pack(fill="x", pady=2)
+        ttk.Button(sec3, text="3.3 Обучить модель отказа", command=self.train_model).pack(fill="x", pady=2)
+        ttk.Button(sec3, text="3.3 Важность признаков", command=self.plot_feature_importance).pack(fill="x", pady=2)
+
+        sec4 = ttk.LabelFrame(left, text="Глава 4. Визуализация и интерактивный отчет", padding=10)
+        sec4.pack(fill="x", pady=5)
+        ttk.Button(sec4, text="4.1 Средние по типу машины", command=self.plot_type_summary).pack(fill="x", pady=2)
+        ttk.Button(sec4, text="4.1 Отказы по типу", command=self.plot_failure_by_type).pack(fill="x", pady=2)
+        ttk.Button(sec4, text="4.2 Панель показателей", command=self.show_dashboard_text).pack(fill="x", pady=2)
+        ttk.Button(sec4, text="Сформировать общий отчет", command=self.generate_full_report).pack(fill="x", pady=2)
+        ttk.Button(sec4, text="Сохранить очищенный CSV", command=self.save_csv).pack(fill="x", pady=2)
+        ttk.Button(sec4, text="Сохранить график PNG", command=self.save_plot).pack(fill="x", pady=2)
+        ttk.Button(sec4, text="Сохранить отчет TXT", command=self.save_text).pack(fill="x", pady=2)
+
+        help_box = ttk.LabelFrame(left, text="Что закрывает методичку", padding=10)
+        help_box.pack(fill="both", expand=True, pady=5)
+        ttk.Label(
+            help_box,
+            text=(
+                "• Раздел 2: очистка данных, таблицы, гистограммы, boxplot,\n"
+                "  корреляции, scatter и выводы.\n\n"
+                "• Глава 3: ANOVA, хи-квадрат, аномалии, модель отказа,\n"
+                "  важность признаков.\n\n"
+                "• Глава 4: ключевые графики и текст для описания\n"
+                "  интерактивного дашборда-аналога."
+            ),
+            justify="left",
+            wraplength=300
+        ).pack(anchor="w")
+
+        self.status_var = tk.StringVar(value="Готово")
+        ttk.Label(right, textvariable=self.status_var, font=("Times New Roman", 12, "bold")).grid(row=0, column=0, sticky="w")
+
+        notebook = ttk.Notebook(right)
+        notebook.grid(row=1, column=0, sticky="nsew")
+
+        tab_data = ttk.Frame(notebook)
+        tab_plot = ttk.Frame(notebook)
+        tab_text = ttk.Frame(notebook)
+        notebook.add(tab_data, text="Таблица")
+        notebook.add(tab_plot, text="Графики")
+        notebook.add(tab_text, text="Текст / выводы")
+
+        tab_data.columnconfigure(0, weight=1)
+        tab_data.rowconfigure(1, weight=1)
+        meta = ttk.Frame(tab_data, padding=8)
+        meta.grid(row=0, column=0, sticky="ew")
+        meta.columnconfigure(1, weight=1)
+        ttk.Label(meta, text="Информация:", font=("Times New Roman", 12, "bold")).grid(row=0, column=0, sticky="w")
+        self.meta_var = tk.StringVar(value="Нет данных")
+        ttk.Label(meta, textvariable=self.meta_var, wraplength=1000).grid(row=0, column=1, sticky="w", padx=(8, 0))
+
+        table_frame = ttk.Frame(tab_data, padding=8)
+        table_frame.grid(row=1, column=0, sticky="nsew")
+        table_frame.columnconfigure(0, weight=1)
+        table_frame.rowconfigure(0, weight=1)
+        self.tree = ttk.Treeview(table_frame, show="headings")
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        ys = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
+        xs = ttk.Scrollbar(table_frame, orient="horizontal", command=self.tree.xview)
+        ys.grid(row=0, column=1, sticky="ns")
+        xs.grid(row=1, column=0, sticky="ew")
+        self.tree.configure(yscrollcommand=ys.set, xscrollcommand=xs.set)
+
+        tab_plot.columnconfigure(0, weight=1)
+        tab_plot.rowconfigure(0, weight=1)
+        plot_frame = ttk.Frame(tab_plot)
+        plot_frame.grid(row=0, column=0, sticky="nsew")
+        plot_frame.columnconfigure(0, weight=1)
+        plot_frame.rowconfigure(0, weight=1)
+        self.fig = Figure(figsize=(10, 6), dpi=100)
+        self.ax = self.fig.add_subplot(111)
+        self.ax.set_title("Здесь будут графики")
+        self.canvas = FigureCanvasTkAgg(self.fig, master=plot_frame)
+        self.canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+        toolbar = NavigationToolbar2Tk(self.canvas, plot_frame, pack_toolbar=False)
+        toolbar.update()
+        toolbar.grid(row=1, column=0, sticky="ew")
+
+        tab_text.columnconfigure(0, weight=1)
+        tab_text.rowconfigure(0, weight=1)
+        self.text = tk.Text(tab_text, wrap="word", font=("Consolas", 11))
+        self.text.grid(row=0, column=0, sticky="nsew")
+        ts = ttk.Scrollbar(tab_text, orient="vertical", command=self.text.yview)
+        ts.grid(row=0, column=1, sticky="ns")
+        self.text.configure(yscrollcommand=ts.set)
+
+    # ---------- Data ----------
+    def _autoload_local_dataset(self):
+        candidates = [
+            self.base_dir / "ai4i2020.csv",
+            self.base_dir / "AI4I 2020 Predictive Maintenance Dataset.csv",
+            self.base_dir / "predictive_maintenance.csv",
+        ]
+        for path in candidates:
+            if path.exists():
+                self.load_csv(path)
+                return
+        messagebox.showinfo("Не найдено", "Положи ai4i2020.csv рядом с программой или используй кнопку 'Открыть CSV'.")
+
+    def open_csv(self):
+        path = filedialog.askopenfilename(filetypes=[("CSV files", "*.csv"), ("All files", "*.*")])
+        if path:
+            self.load_csv(Path(path))
+
+    def load_csv(self, path: Path):
+        try:
+            df = pd.read_csv(path)
+        except Exception as e:
+            messagebox.showerror("Ошибка", f"Не удалось прочитать CSV:\n{e}")
+            return
+        self.df_raw = df.copy()
+        self.df = df.copy()
+        self.file_var.set(f"Загружен: {path.name}")
+        self._update_table(self.df)
+        self._update_meta()
+        self.set_status("Датасет загружен")
+
+    def reset_all(self):
+        self.df_raw = None
+        self.df = None
+        self.model = None
+        self.feature_importances_ = None
+        self.model_features = []
+        self.file_var.set("Файл не загружен")
+        self.meta_var.set("Нет данных")
+        self.tree.delete(*self.tree.get_children())
+        self.text.delete("1.0", "end")
+        self.ax.clear()
+        self.ax.set_title("Здесь будут графики")
+        self.canvas.draw()
+        self.set_status("Сброс выполнен")
+
+    def _update_meta(self):
+        if self.df is None:
+            self.meta_var.set("Нет данных")
+            return
+        self.meta_var.set(
+            f"Строк: {len(self.df)}; столбцов: {self.df.shape[1]}; "
+            f"пропусков: {int(self.df.isna().sum().sum())}; "
+            f"дубликатов: {int(self.df.duplicated().sum())}; "
+            f"доля отказов: {self.df['Machine failure'].mean():.2%}" if 'Machine failure' in self.df.columns else ""
+        )
+
+    def _update_table(self, data: pd.DataFrame, max_rows=300):
+        self.tree.delete(*self.tree.get_children())
+        if data is None or data.empty:
+            return
+        view = data.head(max_rows).copy()
+        cols = list(view.columns)
+        self.tree["columns"] = cols
+        for c in cols:
+            self.tree.heading(c, text=c)
+            self.tree.column(c, width=120, anchor="center", stretch=True)
+        for _, row in view.iterrows():
+            vals = []
+            for v in row.tolist():
+                if pd.isna(v):
+                    vals.append("NaN")
+                elif isinstance(v, float):
+                    vals.append(f"{v:.4f}")
+                else:
+                    vals.append(str(v))
+            self.tree.insert("", "end", values=vals)
+
+    def set_status(self, text):
+        self.status_var.set(text)
+        self.update_idletasks()
+
+    def write_text(self, text, clear=True):
+        if clear:
+            self.text.delete("1.0", "end")
+        self.text.insert("1.0", text)
+        self.last_text = text
+
+    def current_df(self):
+        return self.df
+
+    # ---------- Section 2 ----------
+    def run_preprocessing(self):
+        if self.df is None:
+            return
+        df = self.df.copy()
+        before_rows = len(df)
+        before_dups = int(df.duplicated().sum())
+
+        if self.drop_dups_var.get():
+            df = df.drop_duplicates()
+
+        # feature engineering
+        if "Process temperature [K]" in df.columns and "Air temperature [K]" in df.columns:
+            df["Temperature delta [K]"] = df["Process temperature [K]"] - df["Air temperature [K]"]
+        if "Torque [Nm]" in df.columns and "Rotational speed [rpm]" in df.columns:
+            df["Power proxy"] = df["Torque [Nm]"] * df["Rotational speed [rpm]"]
+        if "Type" in df.columns:
+            df["Type_code"] = LabelEncoder().fit_transform(df["Type"])
+
+        if self.cap_outliers_var.get():
+            numeric_cols = df.select_dtypes(include=np.number).columns
+            for col in numeric_cols:
+                q1 = df[col].quantile(0.25)
+                q3 = df[col].quantile(0.75)
+                iqr = q3 - q1
+                if pd.isna(iqr) or iqr == 0:
+                    continue
+                lower, upper = q1 - 1.5 * iqr, q3 + 1.5 * iqr
+                df[col] = df[col].clip(lower, upper)
+
+        self.df = df
+        self._update_table(self.df)
+        self._update_meta()
+        txt = (
+            "2.1. Предобработка выполнена\n\n"
+            f"Строк до обработки: {before_rows}\n"
+            f"Строк после обработки: {len(df)}\n"
+            f"Дубликатов до обработки: {before_dups}\n"
+            f"Дубликатов после обработки: {int(df.duplicated().sum())}\n"
+            f"Пропуски: {int(df.isna().sum().sum())} (в AI4I их изначально нет)\n\n"
+            "Примененные действия:\n"
+            f"- удаление дубликатов: {'да' if self.drop_dups_var.get() else 'нет'}\n"
+            f"- ограничение выбросов по IQR: {'да' if self.cap_outliers_var.get() else 'нет'}\n"
+            "- создание новых признаков: Temperature delta [K], Power proxy, Type_code\n\n"
+            "Комментарий:\n"
+            "Для этого датасета основная часть предобработки сводится не к заполнению пропусков, "
+            "а к контролю качества данных, удалению возможных дублей и генерации аналитически полезных признаков."
+        )
+        self.write_text(txt)
+        self.set_status("Предобработка завершена")
+
+    def show_stats(self):
+        if self.df is None:
+            return
+        num = self.df.select_dtypes(include=np.number)
+        stats = num.describe().T
+        stats["median"] = num.median()
+        stats["variance"] = num.var()
+        stats["missing"] = num.isna().sum()
+        stats = stats.reset_index().rename(columns={"index": "feature"})
+        self._update_table(stats)
+        self.set_status("Сводная статистика готова")
+
+    def _choose_numeric(self, title="Выбор признака", allow_two=False):
+        cols = self.df.select_dtypes(include=np.number).columns.tolist() if self.df is not None else []
+        if not cols:
+            return None if not allow_two else (None, None)
+        d = tk.Toplevel(self)
+        d.title(title)
+        d.geometry("360x170" if allow_two else "320x130")
+        d.transient(self)
+        d.grab_set()
+        if allow_two:
+            x_var = tk.StringVar(value=cols[0])
+            y_var = tk.StringVar(value=cols[1] if len(cols) > 1 else cols[0])
+            ttk.Label(d, text="X").pack(anchor="w", padx=12, pady=(12, 2))
+            ttk.Combobox(d, values=cols, textvariable=x_var, state="readonly").pack(fill="x", padx=12)
+            ttk.Label(d, text="Y").pack(anchor="w", padx=12, pady=(8, 2))
+            ttk.Combobox(d, values=cols, textvariable=y_var, state="readonly").pack(fill="x", padx=12)
+            out = {"x": None, "y": None}
+            ttk.Button(d, text="OK", command=lambda: (out.update({"x": x_var.get(), "y": y_var.get()}), d.destroy())).pack(pady=12)
+            self.wait_window(d)
+            return out["x"], out["y"]
+        else:
+            var = tk.StringVar(value=cols[0])
+            ttk.Label(d, text="Выбери признак").pack(pady=(12, 4))
+            ttk.Combobox(d, values=cols, textvariable=var, state="readonly").pack(fill="x", padx=12)
+            out = {"v": None}
+            ttk.Button(d, text="OK", command=lambda: (out.update({"v": var.get()}), d.destroy())).pack(pady=12)
+            self.wait_window(d)
+            return out["v"]
+
+    def plot_histogram_dialog(self):
+        col = self._choose_numeric("Гистограмма")
+        if col:
+            self.plot_histogram(col)
+
+    def plot_boxplot_dialog(self):
+        col = self._choose_numeric("Boxplot")
+        if col:
+            self.plot_boxplot(col)
+
+    def plot_scatter_dialog(self):
+        x, y = self._choose_numeric("Scatter", allow_two=True)
+        if x and y:
+            self.plot_scatter(x, y)
+
+    def plot_histogram(self, col):
+        self.ax.clear()
+        self.ax.hist(self.df[col].dropna(), bins=25)
+        self.ax.set_title(f"Гистограмма: {col}")
+        self.ax.set_xlabel(col)
+        self.ax.set_ylabel("Частота")
+        self.last_plot_name = f"hist_{col}"
+        self.fig.tight_layout()
+        self.canvas.draw()
+        self.set_status(f"Построена гистограмма {col}")
+
+    def plot_boxplot(self, col):
+        self.ax.clear()
+        self.ax.boxplot(self.df[col].dropna(), vert=True)
+        self.ax.set_title(f"Boxplot: {col}")
+        self.ax.set_ylabel(col)
+        self.last_plot_name = f"box_{col}"
+        self.fig.tight_layout()
+        self.canvas.draw()
+        self.set_status(f"Построен boxplot {col}")
+
+    def plot_corr(self):
+        num = self.df.select_dtypes(include=np.number)
+        corr = num.corr(numeric_only=True)
+        self.ax.clear()
+        im = self.ax.imshow(corr.values)
+        self.ax.set_xticks(range(len(corr.columns)))
+        self.ax.set_yticks(range(len(corr.columns)))
+        self.ax.set_xticklabels(corr.columns, rotation=45, ha="right", fontsize=8)
+        self.ax.set_yticklabels(corr.columns, fontsize=8)
+        self.ax.set_title("Матрица корреляций")
+        self.fig.colorbar(im, ax=self.ax, fraction=0.04, pad=0.02)
+        self.last_plot_name = "correlation_matrix"
+        self.fig.tight_layout()
+        self.canvas.draw()
+        self.set_status("Матрица корреляций построена")
+
+    def plot_scatter(self, x, y):
+        c = self.df["Machine failure"] if "Machine failure" in self.df.columns else None
+        self.ax.clear()
+        self.ax.scatter(self.df[x], self.df[y], c=c)
+        self.ax.set_title(f"Диаграмма рассеяния: {x} vs {y}")
+        self.ax.set_xlabel(x)
+        self.ax.set_ylabel(y)
+        self.last_plot_name = f"scatter_{x}_{y}"
+        self.fig.tight_layout()
+        self.canvas.draw()
+        self.set_status("Scatter построен")
+
+    def generate_eda_text(self):
+        if self.df is None:
+            return
+        num = self.df.select_dtypes(include=np.number)
+        corr = num.corr(numeric_only=True)
+        pairs = []
+        cols = corr.columns.tolist()
+        for i in range(len(cols)):
+            for j in range(i + 1, len(cols)):
+                pairs.append((cols[i], cols[j], corr.iloc[i, j]))
+        pairs = sorted(pairs, key=lambda t: abs(t[2]), reverse=True)[:5]
+        lines = [
+            "2.2. Выводы по разведочному анализу данных\n",
+            f"1) В наборе {len(self.df)} наблюдений и {self.df.shape[1]} признаков.",
+            f"2) Доля отказов оборудования составляет {self.df['Machine failure'].mean():.2%}.",
+            "3) Основные количественные признаки хорошо подходят для сравнения распределений и построения моделей.",
+            "4) Наиболее сильные корреляционные связи:",
+        ]
+        for a, b, r in pairs:
+            lines.append(f"   - {a} ↔ {b}: r = {r:.3f}")
+        lines += [
+            "5) Визуализация распределений позволяет выявить асимметрию и потенциальные выбросы, особенно по torque, rotational speed и tool wear.",
+            "6) Для дальнейшего анализа целесообразно использовать статистические критерии и модель классификации отказов."
+        ]
+        self.write_text("\n".join(lines))
+        self.set_status("Сформирован текст выводов по EDA")
+
+    # ---------- Section 3 ----------
+    def show_methods_text(self):
+        text = (
+            "3.1. Обоснование выбора методов\n\n"
+            "• ANOVA используется для проверки различий средних значений числового признака "
+            "между тремя типами машин L, M и H.\n"
+            "• Критерий хи-квадрат используется для проверки связи между категориальными переменными "
+            "Type и Machine failure.\n"
+            "• Isolation Forest используется как метод поиска аномальных наблюдений в многомерных данных.\n"
+            "• Random Forest выбран как базовая интерпретируемая модель классификации отказов: "
+            "он устойчив к нелинейностям, позволяет оценить важность признаков и хорошо подходит "
+            "для смешанных производственных данных."
+        )
+        self.write_text(text)
+        self.set_status("Показано обоснование методов")
+
+    def run_anova(self):
+        if self.df is None:
+            return
+        if "Type" not in self.df.columns:
+            return
+        col = "Torque [Nm]"
+        groups = [g[col].values for _, g in self.df.groupby("Type")]
+        stat, p = f_oneway(*groups)
+        text = (
+            "3.2. Проверка гипотезы ANOVA\n\n"
+            "H0: среднее значение Torque [Nm] одинаково для машин типов L, M и H.\n"
+            "H1: хотя бы для одного типа среднее значение Torque [Nm] отличается.\n\n"
+            f"F-statistic = {stat:.4f}\n"
+            f"p-value = {p:.6f}\n\n"
+            + ("Вывод: H0 отвергается, различия статистически значимы." if p < 0.05 else "Вывод: нет оснований отвергнуть H0.")
+        )
+        self.write_text(text)
+        self.set_status("ANOVA выполнена")
+
+    def run_chi_square(self):
+        if self.df is None or "Type" not in self.df.columns or "Machine failure" not in self.df.columns:
+            return
+        table = pd.crosstab(self.df["Type"], self.df["Machine failure"])
+        chi2, p, dof, _ = chi2_contingency(table)
+        out = table.reset_index()
+        self._update_table(out)
+        text = (
+            "3.2. Проверка гипотезы хи-квадрат\n\n"
+            "H0: тип машины и факт отказа независимы.\n"
+            "H1: между типом машины и фактом отказа есть статистическая связь.\n\n"
+            f"chi2 = {chi2:.4f}\n"
+            f"p-value = {p:.6f}\n"
+            f"degrees of freedom = {dof}\n\n"
+            + ("Вывод: H0 отвергается." if p < 0.05 else "Вывод: нет оснований отвергнуть H0.")
+        )
+        self.write_text(text)
+        self.set_status("Хи-квадрат выполнен")
+
+    def run_anomaly_detection(self):
+        if self.df is None:
+            return
+        cols = ["Air temperature [K]", "Process temperature [K]", "Rotational speed [rpm]", "Torque [Nm]", "Tool wear [min]"]
+        X = self.df[cols].copy()
+        model = IsolationForest(contamination=0.03, random_state=42)
+        pred = model.fit_predict(X)
+        self.df["Anomaly"] = (pred == -1).astype(int)
+        anom_count = int(self.df["Anomaly"].sum())
+        self.ax.clear()
+        self.ax.scatter(self.df["Rotational speed [rpm]"], self.df["Torque [Nm]"], c=self.df["Anomaly"])
+        self.ax.set_title("Аномалии: Rotational speed vs Torque")
+        self.ax.set_xlabel("Rotational speed [rpm]")
+        self.ax.set_ylabel("Torque [Nm]")
+        self.last_plot_name = "anomalies"
+        self.fig.tight_layout()
+        self.canvas.draw()
+        self.write_text(
+            "3.3. Поиск аномалий\n\n"
+            f"Isolation Forest выявил {anom_count} потенциально аномальных наблюдений "
+            f"({anom_count / len(self.df):.2%} выборки).\n"
+            "Эти наблюдения можно интерпретировать как нетипичные режимы работы оборудования."
+        )
+        self.set_status("Поиск аномалий выполнен")
+
+    def train_model(self):
+        if self.df is None:
+            return
+        work = self.df.copy()
+        y = work["Machine failure"]
+        X = work.drop(columns=["Machine failure", "UDI", "Product ID", "TWF", "HDF", "PWF", "OSF", "RNF"], errors="ignore")
+        X = pd.get_dummies(X, columns=["Type"], drop_first=True)
+        self.model_features = X.columns.tolist()
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.25, random_state=42, stratify=y
+        )
+        model = RandomForestClassifier(
+            n_estimators=250, random_state=42, class_weight="balanced_subsample"
+        )
+        model.fit(X_train, y_train)
+        pred = model.predict(X_test)
+        proba = model.predict_proba(X_test)[:, 1]
+        auc = roc_auc_score(y_test, proba)
+        report = classification_report(y_test, pred, digits=4)
+        cm = confusion_matrix(y_test, pred)
+        self.model = model
+        self.feature_importances_ = pd.Series(model.feature_importances_, index=X.columns).sort_values(ascending=False)
+
+        text = (
+            "3.3. Построение модели прогнозирования отказа\n\n"
+            "Использована модель Random Forest.\n"
+            f"Train size: {len(X_train)}, test size: {len(X_test)}\n"
+            f"ROC-AUC: {auc:.4f}\n\n"
+            "Матрица ошибок:\n"
+            f"{cm}\n\n"
+            "Classification report:\n"
+            f"{report}\n"
+            "Интерпретация: модель можно использовать для оценки риска отказа и анализа значимости факторов."
+        )
+        self.write_text(text)
+        self.set_status("Модель обучена")
+
+    def plot_feature_importance(self):
+        if self.feature_importances_ is None:
+            messagebox.showinfo("Нет модели", "Сначала обучи модель.")
+            return
+        top = self.feature_importances_.head(10).sort_values()
+        self.ax.clear()
+        self.ax.barh(top.index, top.values)
+        self.ax.set_title("Важность признаков Random Forest")
+        self.last_plot_name = "feature_importance"
+        self.fig.tight_layout()
+        self.canvas.draw()
+        self.set_status("Показана важность признаков")
+
+    # ---------- Section 4 ----------
+    def plot_type_summary(self):
+        if self.df is None:
+            return
+        grouped = self.df.groupby("Type")[["Torque [Nm]", "Tool wear [min]", "Rotational speed [rpm]"]].mean()
+        self._update_table(grouped.reset_index())
+        self.ax.clear()
+        x = np.arange(len(grouped.index))
+        width = 0.25
+        self.ax.bar(x - width, grouped["Torque [Nm]"], width, label="Torque")
+        self.ax.bar(x, grouped["Tool wear [min]"], width, label="Tool wear")
+        self.ax.bar(x + width, grouped["Rotational speed [rpm]"], width, label="RPM")
+        self.ax.set_xticks(x)
+        self.ax.set_xticklabels(grouped.index)
+        self.ax.set_title("Средние показатели по типам машин")
+        self.ax.legend()
+        self.last_plot_name = "type_summary"
+        self.fig.tight_layout()
+        self.canvas.draw()
+        self.set_status("Построено сравнение по типам")
+
+    def plot_failure_by_type(self):
+        if self.df is None:
+            return
+        rates = self.df.groupby("Type")["Machine failure"].mean().sort_index()
+        self.ax.clear()
+        self.ax.bar(rates.index, rates.values)
+        self.ax.set_title("Доля отказов по типам машин")
+        self.ax.set_ylabel("Failure rate")
+        self.last_plot_name = "failure_by_type"
+        self.fig.tight_layout()
+        self.canvas.draw()
+        self.set_status("Построен график отказов по типам")
+
+    def show_dashboard_text(self):
+        if self.df is None:
+            return
+        txt = (
+            "4.2. Описание интерактивного дашборда-аналога\n\n"
+            "В интерфейсе приложения пользователь может:\n"
+            "• загружать датасет и сразу видеть общую сводку;\n"
+            "• переключаться между табличным представлением, графиками и текстовыми выводами;\n"
+            "• запускать отдельные сценарии предобработки, EDA, статистических тестов и моделирования;\n"
+            "• сохранять очищенные данные, графики и отчет.\n\n"
+            "Для конечного пользователя наибольшую практическую ценность несут:\n"
+            "• показатели доли отказов;\n"
+            "• сравнительные графики по типам машин;\n"
+            "• результаты модели риска отказа;\n"
+            "• визуальное выявление аномальных режимов работы."
+        )
+        self.write_text(txt)
+        self.set_status("Сформировано описание дашборда")
+
+    def generate_full_report(self):
+        if self.df is None:
+            return
+        failure_rate = self.df["Machine failure"].mean()
+        top_corr = self.df.select_dtypes(include=np.number).corr(numeric_only=True)["Machine failure"].drop("Machine failure").sort_values(key=np.abs, ascending=False).head(5)
+        lines = [
+            "КРАТКИЙ ОТЧЕТ ПО AI4I 2020",
+            "",
+            f"Наблюдений: {len(self.df)}",
+            f"Признаков: {self.df.shape[1]}",
+            f"Доля отказов: {failure_rate:.2%}",
+            "",
+            "Ключевые связи с Machine failure:",
+        ]
+        for name, val in top_corr.items():
+            lines.append(f"- {name}: r = {val:.3f}")
+        if self.feature_importances_ is not None:
+            lines += ["", "Топ-5 важных признаков модели:"]
+            for name, val in self.feature_importances_.head(5).items():
+                lines.append(f"- {name}: {val:.4f}")
+        lines += [
+            "",
+            "Практический вывод:",
+            "датасет подходит для оценки риска отказа оборудования, сравнения режимов работы машин разных типов и демонстрации методов интеллектуального анализа данных."
+        ]
+        self.write_text("\n".join(lines))
+        self.set_status("Общий отчет сформирован")
+
+    # ---------- Save ----------
+    def save_csv(self):
+        if self.df is None:
+            return
+        path = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV files", "*.csv")])
+        if path:
+            self.df.to_csv(path, index=False)
+            self.set_status("CSV сохранен")
+
+    def save_plot(self):
+        path = filedialog.asksaveasfilename(defaultextension=".png", filetypes=[("PNG files", "*.png")])
+        if path:
+            self.fig.savefig(path, bbox_inches="tight")
+            self.set_status("График сохранен")
+
+    def save_text(self):
+        if not self.last_text:
+            self.generate_full_report()
+        path = filedialog.asksaveasfilename(defaultextension=".txt", filetypes=[("Text files", "*.txt")])
+        if path:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(self.last_text)
+            self.set_status("Текст сохранен")
+
+
+if __name__ == "__main__":
+    app = AI4IApp()
+    app.mainloop()
